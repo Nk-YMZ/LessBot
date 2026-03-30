@@ -490,8 +490,12 @@ class GroupLLMHandler(MessageHandler):
         # 1. 导演看全景图（完整的 50 条记忆）
         full_context = self._build_context(messages)
         
-        # 2. 演员看纯净短切片（切断了过去的烂梗记忆，只看最近3条纯用户发言）
-        actor_context = self._build_actor_context(messages, max_recent=6)
+        # 2. 演员看纯净短切片（只看最近8条纯用户发言）
+        actor_context = self._build_actor_context(messages, max_recent=8)
+
+        # 🧠 【新增】：捞出机器人自己最近说过的 3 句话，用作防重复警告
+        recent_self_msgs = [msg.raw_message for msg in messages if msg.sender_name == "我"][-3:]
+        recent_self_str = "\n".join(recent_self_msgs) if recent_self_msgs else "无"
         
         try:
             # 【导演模型】推演核心逻辑和状态 (使用 full_context)
@@ -507,11 +511,11 @@ class GroupLLMHandler(MessageHandler):
                 logger.error(f"[群{group_id}] 导演模型调用失败: {strategic_intent}")
                 return
             
-            logger.info(f"[群{group_id}] 导演战术指令: {strategic_intent}")
+            logger.info(f"[群{group_id}] 导演指令: {strategic_intent}")
             
             # 【演员模型】根据指令生成最终回复 (使用 actor_context！)
             logger.info(f"[群{group_id}] 调用演员模型 ({self._actor_model})...")
-            actor_prompt = self._build_actor_prompt(actor_context, strategic_intent)
+            actor_prompt = self._build_actor_prompt(actor_context, strategic_intent, recent_self_str)
             reply = await ask_llm(
                 model_name=self._actor_model,
                 prompt_content=actor_prompt
@@ -527,7 +531,7 @@ class GroupLLMHandler(MessageHandler):
             # 【物理层模拟】分段发送
             await self._send_with_typing_simulation(group_id, reply, client)
 
-            # 🧠 【新增：记忆烙印】把自己说的话也记进历史池，免得下次接不上自己的梗！
+            # 🧠 【新增：记忆烙印】把自己说的话也记进历史池
             async with lock:
                 # 重新获取 buffer，因为在 await 大模型期间，可能又有新消息进来了
                 buffer = self._buffers.get(group_id)
@@ -557,7 +561,7 @@ class GroupLLMHandler(MessageHandler):
         lines = [msg.format_context() for msg in messages]
         return "\n".join(lines)
     
-    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 6) -> str:
+    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 8) -> str:
         """
         【架构级隔离】构建演员专属的纯净上下文
         
@@ -576,32 +580,36 @@ class GroupLLMHandler(MessageHandler):
     
     def _build_director_prompt(self, context: str) -> str:
         """
-        极简版导演提示词 (Less is More)
-        去角色化，只做客观的阅读理解和方向建议。
+        极简版导演提示词 (禁止写台词)
         """
         return f"""阅读以下群聊记录，用一句话完成两个任务：
 1. 概括群友最新正在聊的具体话题。
-2. 给出一个符合当前聊天氛围的、极其简短自然的回复建议。
+2. 指示回复的【情绪和立场】。
+（禁止写出具体的台词！禁止教演员怎么说话！只能给出方向）
 
 【群聊记录】
 {context}
 
-直接输出这句话，例如：“大家在约游戏，建议你询问几点开打是否缺人。”或“群友在吐槽天气，建议你附和一句太热了。”"""
+直接输出这句话："""
 
-    def _build_actor_prompt(self, context: str, strategic_intent: str) -> str:
+    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "") -> str:
         """
         极简版演员提示词
         """
         return f"""你是这个QQ群里的普通群友。
 
-【回复建议】
+【回复方向】
 {strategic_intent}
+
+【你最近说过的话】
+{recent_self}
+（不能重复你刚说过的意思和词汇！请换个角度接话！）
 
 【最近的聊天记录】
 {context}
 
 【要求】
-1. 吸收建议，用符合情景的语气接一句话。
+1. 参考回复方向，用符合情景的语气接一句话。
 2. 绝对不要用括号写内心戏，不要有任何机器感。
 3. 如果想分段发，用 | 符号分隔。
 
@@ -762,7 +770,7 @@ class BotCore:
         """
         停止机器人
         
-        优雅地关闭 NapCat 客户端。
+        关闭 NapCat 客户端。
         """
         if not self._running:
             return
