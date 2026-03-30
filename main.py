@@ -661,10 +661,11 @@ class GroupLLMHandler(MessageHandler):
         lines = [msg.format_context() for msg in recent_messages]
         return "\n".join(lines)
     
-    def _build_director_prompt(self, context: str) -> str:
+    def _build_director_prompt(self, context: str, is_at_me: bool = False) -> str:
         """
         极简版导演提示词 (禁止写台词)
         """
+        at_warning = "\n【注意】：刚才的聊天中群友专门 @ 了你！你必须明确意识到自己是“被搭话的人”，并在指令中要求演员以“被点名者”的第一人称视角来回应。" if is_at_me else ""
         return f"""阅读以下群聊记录，用一句话完成两个任务：
 1. 概括群友最新正在聊的具体话题。
 2. 指示回复的【情绪和立场】。
@@ -675,13 +676,10 @@ class GroupLLMHandler(MessageHandler):
 
 直接输出这句话："""
 
-    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "", is_at_me: bool = False) -> str:
+    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "") -> str:
         """
         极简版演员提示词
         """
-
-        at_warning = "\n【注意】：刚才的聊天中群友专门 @ 了你！你必须明确意识到自己是“被搭话的人”，并在指令中要求演员以“被点名者”的第一人称视角来回应！" if is_at_me else ""
-
         return f"""你是这个QQ群里的普通群友。
 
 【回复方向】
