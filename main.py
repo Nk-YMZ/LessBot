@@ -485,7 +485,7 @@ class GroupLLMHandler(MessageHandler):
             logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
             return
         elif force_reply:
-            logger.info(f"[群{group_id}] 🔔 触发 @必回 ，无视概率，强制回复")
+            logger.info(f"[群{group_id}] 🔔 触发 @ 必回 ，无视概率，强制回复")
         
         # 1. 导演看全景图（完整的 50 条记忆）
         full_context = self._build_context(messages)
