@@ -210,27 +210,63 @@ class LLMCaller:
                 'Authorization': f'Bearer {api_key}'
             }
     
+    # def _build_request_body(
+    #     self, 
+    #     model_config: dict, 
+    #     prompt_content: str,
+    #     system_prompt: Optional[str] = None
+    # ) -> dict:
+    #     """
+    #     构建请求体（根据 provider 类型）
+        
+    #     Args:
+    #         model_config: 模型配置
+    #         prompt_content: 用户输入的提示内容
+    #         system_prompt: 可选的系统提示词
+            
+    #     Returns:
+    #         请求体字典
+    #     """
+    #     provider = model_config.get('provider', 'openai')
+    #     model_name = model_config.get('model', 'gpt-3.5-turbo')
+        
+    #     if provider == 'anthropic':
+    #         body = {
+    #             'model': model_name,
+    #             'messages': [{'role': 'user', 'content': prompt_content}],
+    #             'max_tokens': 4096
+    #         }
+    #         if system_prompt:
+    #             body['system'] = system_prompt
+    #     else:
+    #         # OpenAI 兼容格式
+    #         messages = []
+    #         if system_prompt:
+    #             messages.append({'role': 'system', 'content': system_prompt})
+    #         messages.append({'role': 'user', 'content': prompt_content})
+            
+    #         body = {
+    #             'model': model_name,
+    #             'messages': messages
+    #         }
+        
+    #     return body
+
     def _build_request_body(
         self, 
         model_config: dict, 
         prompt_content: str,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        image_url: Optional[str] = None  # <--- [新增参数]
     ) -> dict:
         """
         构建请求体（根据 provider 类型）
-        
-        Args:
-            model_config: 模型配置
-            prompt_content: 用户输入的提示内容
-            system_prompt: 可选的系统提示词
-            
-        Returns:
-            请求体字典
         """
         provider = model_config.get('provider', 'openai')
         model_name = model_config.get('model', 'gpt-3.5-turbo')
         
         if provider == 'anthropic':
+            # ... (保持原样不动) ...
             body = {
                 'model': model_name,
                 'messages': [{'role': 'user', 'content': prompt_content}],
@@ -239,11 +275,23 @@ class LLMCaller:
             if system_prompt:
                 body['system'] = system_prompt
         else:
-            # OpenAI 兼容格式
+            # OpenAI 兼容格式 (阿里千问也是走这里)
             messages = []
             if system_prompt:
                 messages.append({'role': 'system', 'content': system_prompt})
-            messages.append({'role': 'user', 'content': prompt_content})
+            
+            # 🎯 【核心修改】：如果是视觉请求，构建多模态 content 数组
+            if image_url:
+                messages.append({
+                    'role': 'user', 
+                    'content': [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": prompt_content}
+                    ]
+                })
+            else:
+                # 普通纯文本请求
+                messages.append({'role': 'user', 'content': prompt_content})
             
             body = {
                 'model': model_name,
@@ -400,7 +448,8 @@ async def ask_llm(
     model_name: str, 
     prompt_content: str,
     system_prompt: Optional[str] = None,
-    config_path: Optional[str] = None
+    config_path: Optional[str] = None,
+    image_url: Optional[str] = None
 ) -> str:
     """
     统一的大模型调用接口（异步函数）
@@ -449,7 +498,7 @@ async def ask_llm(
     
     # 构建请求
     headers = caller._build_headers(model_config)
-    body = caller._build_request_body(model_config, prompt_content, system_prompt)
+    body = caller._build_request_body(model_config, prompt_content, system_prompt, image_url)
     
     # 发送请求
     async with httpx.AsyncClient() as client:

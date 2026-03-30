@@ -14,6 +14,7 @@ import json
 import logging
 import random
 import time
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,8 +54,9 @@ class BotConfig:
     allowed_groups: List[int] = field(default_factory=list)
     
     # 模型配置
-    director_model: str = "deepseek-chat"
+    director_model: str = "deepseek-reasoner"
     actor_model: str = "deepseek-chat"
+    vision_model: str = "qwen3.5-plus"
     
     # 日志级别
     log_level: str = "INFO"
@@ -100,8 +102,9 @@ class BotConfig:
                 max_context_messages=int(behavior.get('max_context_messages', 50)),
                 reply_probability=float(behavior.get('reply_probability', 0.5)),
                 allowed_groups=behavior.get('allowed_groups', []),
-                director_model=models.get('director', 'deepseek-chat'),
+                director_model=models.get('director', 'deepseek-reasoner'),
                 actor_model=models.get('actor', 'deepseek-chat'),
+                vision_model=models.get('vision', 'qwen3.5-plus'),
                 log_level=log_cfg.get('level', 'INFO'),
             )
             
@@ -240,6 +243,33 @@ class MessageHandler(ABC):
         
         return False
 
+# ============================================================
+# 视觉处理中枢 (Vision Analyzer)
+# ============================================================
+
+class VisionAnalyzer:
+    """
+    专门负责将群聊中的图片转换为文本描述的视觉中枢。
+    采用“先看图，后入池”的架构，保持后续导演/演员模型的纯文本输入流。
+    """
+    @staticmethod
+    async def analyze(image_url: str, model_name: str) -> str:
+        try:
+            logger.info(f"👁️ 正在调用视觉模型 ({model_name}) 分析图片...")
+            
+            # 视觉模型的提示词：要求极其简短、直击要害
+            vision_prompt = "你是一个群聊视觉助手。请简短描述这张图片的核心内容。如果是表情包请指出它的情绪，如果是梗图请解释，如果是文字截图请提取核心意思。字数严格控制在10-50字以内。"
+            
+            # 调用底层 LLM (注意：llm_caller 需要支持传入 image_url)
+            description = await ask_llm(
+                model_name=model_name,
+                prompt_content=vision_prompt,
+                image_url=image_url  # <--- 传递图片链接给底层
+            )
+            return description.strip()
+        except Exception as e:
+            logger.error(f"视觉分析失败: {e}")
+            return "无法看清的图片"
 
 # ============================================================
 # 群聊 LLM 处理器（核心业务逻辑）
@@ -265,8 +295,9 @@ class GroupLLMHandler(MessageHandler):
         typing_delay_min: float = 0.8,
         typing_delay_max: float = 1.5,
         max_context_messages: int = 50,
-        director_model: str = "deepseek-chat",
+        director_model: str = "deepseek-reasoner",
         actor_model: str = "deepseek-chat",
+        vision_model: str = "qwen3.5-plus",
         allowed_groups: List[int] = None,
         reply_probability: float = 0.5
     ):
@@ -291,6 +322,7 @@ class GroupLLMHandler(MessageHandler):
         self._max_context_messages = max_context_messages
         self._director_model = director_model
         self._actor_model = actor_model
+        self._vision_model = vision_model
         self._allowed_groups = allowed_groups or []
         self._reply_probability = reply_probability
         
@@ -331,6 +363,7 @@ class GroupLLMHandler(MessageHandler):
             max_context_messages=config.max_context_messages,
             director_model=config.director_model,
             actor_model=config.actor_model,
+            vision_model=config.vision_model,
             allowed_groups=config.allowed_groups,
             reply_probability=config.reply_probability
         )
@@ -383,11 +416,28 @@ class GroupLLMHandler(MessageHandler):
         
         is_at_me = f"[CQ:at,qq={self_id}]" in raw_message
 
+        # 🎯 【新增：图像拦截与视觉解析】
+        # 使用正则提取 NapCat CQ 码中的图片 URL: [CQ:image,file=...,url=https://...]
+        image_urls = re.findall(r'\[CQ:image,.*?url=([^\]]+)\]', raw_message)
+        # 把长长的 CQ 码替换成干净的占位符
+        clean_message = re.sub(r'\[CQ:image.*?\]', '[图片]', raw_message)
+
+        if image_urls:
+            logger.info(f"[群{group_id}] 拦截到 {len(image_urls)} 张图片，启动视觉解析...")
+            descriptions = []
+            for url in image_urls:
+                # 阻塞式获取图片文本描述（在防抖入池前完成翻译）
+                desc = await VisionAnalyzer.analyze(url, self._vision_model)
+                descriptions.append(desc)
+            
+            # 将视觉翻译结果悄悄附加在消息文字后面
+            clean_message += f" (视觉系统提示：{', '.join(descriptions)})"
+
         # 构建消息对象
         msg = GroupMessage(
             group_id=group_id,
             user_id=user_id,
-            raw_message=raw_message,
+            raw_message=clean_message,
             sender_name=sender_name,
             timestamp=time.time(),
             is_at_me=is_at_me
