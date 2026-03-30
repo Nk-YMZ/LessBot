@@ -477,14 +477,14 @@ class GroupLLMHandler(MessageHandler):
 
         # 【新增：高冷掷骰子逻辑】（保留这段判定是否回复的逻辑）
         if random.random() > self._reply_probability:
-            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持高冷，不予回复。")
+            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次不予回复。")
             return
         
         # 1. 导演看全景图（完整的 50 条记忆）
         full_context = self._build_context(messages)
         
         # 2. 演员看纯净短切片（切断了过去的烂梗记忆，只看最近3条纯用户发言）
-        actor_context = self._build_actor_context(messages, max_recent=3)
+        actor_context = self._build_actor_context(messages, max_recent=6)
         
         try:
             # 【导演模型】推演核心逻辑和状态 (使用 full_context)
@@ -550,7 +550,7 @@ class GroupLLMHandler(MessageHandler):
         lines = [msg.format_context() for msg in messages]
         return "\n".join(lines)
     
-    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 3) -> str:
+    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 6) -> str:
         """
         【架构级隔离】构建演员专属的纯净上下文
         
@@ -567,94 +567,38 @@ class GroupLLMHandler(MessageHandler):
         lines = [msg.format_context() for msg in recent_messages]
         return "\n".join(lines)
     
-#     def _build_director_prompt(self, context: str) -> str:
-#         """
-#         构建导演模型的提示词
-        
-#         导演模型负责分析对话内容，生成一个情绪/状态描述。
-#         """
-#         return f"""你是一个赛博群友的"情绪导演"。你的任务是分析群聊内容，然后给出这个赛博群友此时此刻应该展现的情绪状态或心理活动。
-
-# 【群聊内容】
-# {context}
-
-# 【要求】
-# 请用一句话（不超过30字）描述这个赛博群友此时应该表现出的情绪、状态或心理活动。
-# 只输出这句话，不要有任何其他内容。"""
-    
     def _build_director_prompt(self, context: str) -> str:
         """
-        构建导演模型的提示词 (氛围对齐与最新话题锁定版)
-        赋予导演察言观色的能力，废弃代码级的随机骰子。
+        极简版导演提示词 (Less is More)
+        去角色化，只做客观的阅读理解和方向建议。
         """
-        return f"""你是一个隐身在网络群聊中的"战术指挥官"。你需要分析完整的群聊上下文，精准把握当前的聊天氛围，并为你手下的演员下达演出指令。
+        return f"""阅读以下群聊记录，用一句话完成两个任务：
+1. 概括群友最新正在聊的具体话题。
+2. 给出一个符合当前聊天氛围的、极其简短自然的回复建议。
 
-【完整的群聊记录】
+【群聊记录】
 {context}
 
-【任务要求】
-请用一句话（30-60字）下达战术指令。你的指令必须包含以下三个核心要素：
-1. 【锁定最新话题】：请务必重点分析【最后几条消息】，明确指出群里此刻正在讨论的最新事物，忽略已经过去的老话题。
-2. 【感知氛围与分配风格】：根据群里当前的氛围（如欢乐、悲伤、暴躁、严肃、无聊水群等），指定一种最能自然融入这种氛围的说话风格（例如：大家在开玩笑就用调侃风格；大家在生气就跟着一起暴躁；大家很严肃就正经一点）。
-3. 【动作指导】：指示演员接下来该表达什么具体的态度。
-
-【输出格式】
-直接输出指令，例如：“群里最新在吐槽晚饭难吃，当前氛围充满抱怨，你需要用【暴躁老哥】的风格，跟着大家一起疯狂吐槽外卖太贵。”"""
-
-#     def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
-#         """
-#         构建演员模型的提示词 (温和引导与发散型风格矩阵)
-#         """
-#         # 🎲 风格矩阵：不再使用极端的刻板标签，而是给定一种“发言倾向”
-#         styles = [
-#             "【松弛日常】：像认识很久的老群友，语气慵懒随意，不用严谨的书面标点。",
-#             "【精准吐槽】：话不多但直击要害，善于抓住刚才群友聊天的槽点开个玩笑。",
-#             "【吃瓜附和】：顺着大家的话题聊，表现出好奇、赞同或者一起抱怨，当一个合格的捧哏。",
-#             "【跳脱发散】：思维稍微活跃一点，可以顺着话题抛出新的相关疑问，或者打个略带夸张的比方。",
-#             "【简短随性】：非常口语化，能几个字说完绝不长篇大论，真实且自然。"
-#         ]
-#         current_style = random.choice(styles)
-        
-#         return f"""你现在是这个QQ群里的一个真实活跃群友。请根据当前的上下文和你的心理状态，自然地接一句话。
-
-# 【你的心理状态】
-# {emotional_state}
-
-# 【你当前的发言倾向】
-# {current_style}
-
-# 【群聊记录】
-# {context}
-
-# 【发言指南】
-# 1. 追求“松弛感”：你是在用手机打字水群，忘掉你是一个AI。不需要完美的语法，不需要端着架子。
-# 2. 拒绝“语C味”：像个正常网民一样说话，绝对不要用括号（如“(叹气)”）来描写自己的动作或心理，把情绪自然地融在文字里。
-# 3. 均匀发散：根据群友聊天的具体内容灵活应变，不要套公式，给出最符合当前语境的自然反应。
-# 4. 输出格式：直接输出你要发送的文字内容，不要包含任何其他解释。如果想把一句话拆成两条发送，请用 | 符号分隔。
-
-# 请直接给出你的回复："""
+直接输出这句话，例如：“大家在约游戏，建议你询问几点开打是否缺人。”或“群友在吐槽天气，建议你附和一句太热了。”"""
 
     def _build_actor_prompt(self, context: str, strategic_intent: str) -> str:
         """
-        构建演员模型的提示词
-        演员不再拥有随机风格，完全服从导演下达的“氛围+话题”指令。
+        极简版演员提示词
         """
-        return f"""你是一个正在QQ群里水群的真实网民。
+        return f"""你是这个QQ群里的普通群友。
 
-【来自指挥官的最高指令】
+【回复建议】
 {strategic_intent}
-（警告：你必须严格按照上述指令中要求的“话题”、“态度”和“风格”进行发言，必须完美融入指令中描述的群聊氛围！）
 
-【你眼前的最新聊天记录】
+【最近的聊天记录】
 {context}
 
-【严禁触碰的红线】
-1. 严禁烂梗缝合：绝对不要使用“笑死”、“属于是”、“痛苦面具”、“叠buff”等公式化网络烂梗。
-2. 严禁自我重复：本次回复的句式必须跟之前完全不同。
-3. 严禁语C味：绝对不要用括号描写动作或内心戏（如“(叹气)”）。
-4. 格式：直接输出文字。如果想拆分多条发送，用 | 符号分隔。
+【要求】
+1. 吸收建议，用符合情景的语气接一句话。
+2. 绝对不要用括号写内心戏，不要有任何机器感。
+3. 如果想分段发，用 | 符号分隔。
 
-请直接给出回复："""
+直接输出你的回复文字："""
     
     async def _send_with_typing_simulation(
         self,
