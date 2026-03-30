@@ -134,6 +134,7 @@ class GroupMessage:
     raw_message: str
     sender_name: str = ""
     timestamp: float = 0.0
+    is_at_me: bool = False
     
     def format_context(self) -> str:
         """格式化为上下文字符串"""
@@ -374,18 +375,22 @@ class GroupLLMHandler(MessageHandler):
         group_id = event.get('group_id')
         user_id = event.get('user_id')
         raw_message = event.get('raw_message', '')
+        self_id = event.get('self_id', 0)
         
         # 获取发送者信息
         sender = event.get('sender', {})
         sender_name = sender.get('card') or sender.get('nickname', '')
         
+        is_at_me = f"[CQ:at,qq={self_id}]" in raw_message
+
         # 构建消息对象
         msg = GroupMessage(
             group_id=group_id,
             user_id=user_id,
             raw_message=raw_message,
             sender_name=sender_name,
-            timestamp=time.time()
+            timestamp=time.time(),
+            is_at_me=is_at_me
         )
         
         # 将消息加入缓冲池（带防抖）
@@ -471,14 +476,16 @@ class GroupLLMHandler(MessageHandler):
             
             # 提取消息（消费掉缓冲池）
             messages = buffer.messages.copy()
-            # buffer.messages.clear()
             
             logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
 
-        # 【新增：高冷掷骰子逻辑】（保留这段判定是否回复的逻辑）
-        if random.random() > self._reply_probability:
-            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次不予回复。")
+        force_reply = any(msg.is_at_me for msg in messages)
+        # 【掷骰子逻辑】如果没有人 @ 我，才去乖乖摇骰子
+        if not force_reply and random.random() > self._reply_probability:
+            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
             return
+        elif force_reply:
+            logger.info(f"[群{group_id}] 🔔 触发 @必回 ，无视概率，强制回复")
         
         # 1. 导演看全景图（完整的 50 条记忆）
         full_context = self._build_context(messages)
