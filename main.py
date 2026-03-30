@@ -15,6 +15,8 @@ import logging
 import random
 import time
 import re
+import base64
+import httpx
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,26 +251,48 @@ class MessageHandler(ABC):
 
 class VisionAnalyzer:
     """
-    专门负责将群聊中的图片转换为文本描述的视觉中枢。
-    采用“先看图，后入池”的架构，保持后续导演/演员模型的纯文本输入流。
+    视觉中枢 (Base64 版)
     """
     @staticmethod
     async def analyze(image_url: str, model_name: str) -> str:
         try:
             logger.info(f"👁️ 正在调用视觉模型 ({model_name}) 分析图片...")
             
-            # 视觉模型的提示词：要求极其简短、直击要害
+            # 1. 清洗 URL（修复 CQ 码的 &amp; 转义 Bug）
+            clean_url = image_url.replace('&amp;', '&')
+            
+            # 2. 【核心绝招】本地下载并转为 Base64，彻底破解腾讯防盗链
+            try:
+                async with httpx.AsyncClient() as client:
+                    img_resp = await client.get(clean_url, timeout=5.0)
+                    if img_resp.status_code == 200:
+                        b64_data = base64.b64encode(img_resp.content).decode('utf-8')
+                        clean_url = f"data:image/jpeg;base64,{b64_data}"
+                        logger.info("✅ 图片已成功转为 Base64 内存直传模式")
+                    else:
+                        logger.warning(f"图片下载失败 (状态码 {img_resp.status_code})，尝试回退到 URL 模式")
+            except Exception as dl_e:
+                logger.warning(f"图片下载异常，尝试回退到 URL 模式: {dl_e}")
+            
+            # 3. 构造极简视觉提示词
             vision_prompt = "你是一个群聊视觉助手。请简短描述这张图片的核心内容。如果是表情包请指出它的情绪，如果是梗图请解释，如果是文字截图请提取核心意思。字数严格控制在10-50字以内。"
             
-            # 调用底层 LLM (注意：llm_caller 需要支持传入 image_url)
+            # 4. 调用大模型
             description = await ask_llm(
                 model_name=model_name,
                 prompt_content=vision_prompt,
-                image_url=image_url  # <--- 传递图片链接给底层
+                image_url=clean_url
             )
+            
+            # 5. 拦截 llm_caller 抛上来的错误字符串，防止污染聊天记忆
+            if description.startswith("[LLM"):
+                logger.error(f"❌ 视觉 API 拒绝了请求: {description}")
+                return "一张无法显示的图片"
+                
             return description.strip()
+            
         except Exception as e:
-            logger.error(f"视觉分析失败: {e}")
+            logger.error(f"视觉分析发生未知异常: {e}")
             return "无法看清的图片"
 
 # ============================================================
