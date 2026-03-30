@@ -5,6 +5,7 @@
     "api_keys": {
         "openai": "${OPENAI_API_KEY:你的OpenAI密钥}",
         "deepseek": "${DEEPSEEK_API_KEY:你的DeepSeek密钥}",
+        "qwen": "${QWEN_API_KEY:你的Qwen密钥}",
         "siliconflow": "${SILICONFLOW_API_KEY:你的SiliconFlow密钥}",
         "anthropic": "${ANTHROPIC_API_KEY:你的Anthropic密钥}",
         "custom": "${CUSTOM_API_KEY:你的自定义API密钥}"
@@ -25,6 +26,11 @@
             "api_url": "https://api.deepseek.com/v1/chat/completions",
             "api_key": "${api_keys.deepseek}",
             "model": "deepseek-reasoner"
+        },
+        "qwen3.5-plus": {
+            "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "${api_keys.qwen}",
+            "model": "qwen3.5-plus"
         },
         "claude-3-opus": {
             "api_url": "https://api.anthropic.com/v1/messages",

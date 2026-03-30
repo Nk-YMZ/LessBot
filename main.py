@@ -288,8 +288,12 @@ class VisionAnalyzer:
             if description.startswith("[LLM"):
                 logger.error(f"❌ 视觉 API 拒绝了请求: {description}")
                 return "一张无法显示的图片"
+            
+            # 🎯 【新增：打印视觉解析的最终结果】
+            result_text = description.strip()
+            logger.info(f"📸 视觉解析完成，提取画面特征：{result_text}")
                 
-            return description.strip()
+            return result_text
             
         except Exception as e:
             logger.error(f"视觉分析发生未知异常: {e}")
