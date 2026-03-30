@@ -475,33 +475,36 @@ class GroupLLMHandler(MessageHandler):
             
             logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
 
-        # 【新增：高冷掷骰子逻辑】
+        # 【新增：高冷掷骰子逻辑】（保留这段判定是否回复的逻辑）
         if random.random() > self._reply_probability:
             logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持高冷，不予回复。")
             return
         
-        # 拼装上下文
-        context = self._build_context(messages)
+        # 1. 导演看全景图（完整的 50 条记忆）
+        full_context = self._build_context(messages)
+        
+        # 2. 演员看纯净短切片（切断了过去的烂梗记忆，只看最近3条纯用户发言）
+        actor_context = self._build_actor_context(messages, max_recent=3)
         
         try:
-            # 【导演模型】生成情绪/状态
+            # 【导演模型】推演核心逻辑和状态 (使用 full_context)
             logger.info(f"[群{group_id}] 调用导演模型 ({self._director_model})...")
-            director_prompt = self._build_director_prompt(context)
-            emotional_state = await ask_llm(
+            director_prompt = self._build_director_prompt(full_context)
+            strategic_intent = await ask_llm(
                 model_name=self._director_model,
                 prompt_content=director_prompt
             )
             
             # 检查导演模型是否返回错误
-            if emotional_state.startswith("[LLM"):
-                logger.error(f"[群{group_id}] 导演模型调用失败: {emotional_state}")
+            if strategic_intent.startswith("[LLM"):
+                logger.error(f"[群{group_id}] 导演模型调用失败: {strategic_intent}")
                 return
             
-            logger.info(f"[群{group_id}] 导演状态: {emotional_state}")
+            logger.info(f"[群{group_id}] 导演战术指令: {strategic_intent}")
             
-            # 【演员模型】生成最终回复
+            # 【演员模型】根据指令生成最终回复 (使用 actor_context！)
             logger.info(f"[群{group_id}] 调用演员模型 ({self._actor_model})...")
-            actor_prompt = self._build_actor_prompt(context, emotional_state)
+            actor_prompt = self._build_actor_prompt(actor_context, strategic_intent)
             reply = await ask_llm(
                 model_name=self._actor_model,
                 prompt_content=actor_prompt
@@ -512,7 +515,7 @@ class GroupLLMHandler(MessageHandler):
                 logger.error(f"[群{group_id}] 演员模型调用失败: {reply}")
                 return
             
-            logger.info(f"[群{group_id}] 演员回复: {reply}")
+            logger.info(f"[群{group_id}] 演员最终回复: {reply}")
             
             # 【物理层模拟】分段发送
             await self._send_with_typing_simulation(group_id, reply, client)
@@ -547,72 +550,111 @@ class GroupLLMHandler(MessageHandler):
         lines = [msg.format_context() for msg in messages]
         return "\n".join(lines)
     
-    def _build_director_prompt(self, context: str) -> str:
+    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 3) -> str:
         """
-        构建导演模型的提示词
+        【架构级隔离】构建演员专属的纯净上下文
         
-        导演模型负责分析对话内容，生成一个情绪/状态描述。
+        核心逻辑：
+        1. 过滤掉机器人自己 (sender_name="我") 过去的所有发言，彻底切断自我洗脑的路径。
+        2. 只保留最近的 max_recent 条真实用户的发言，让演员只针对眼前的对话做出反应。
         """
-        return f"""你是一个赛博群友的"情绪导演"。你的任务是分析群聊内容，然后给出这个赛博群友此时此刻应该展现的情绪状态或心理活动。
-
-【群聊内容】
-{context}
-
-【要求】
-请用一句话（不超过30字）描述这个赛博群友此时应该表现出的情绪、状态或心理活动。
-只输出这句话，不要有任何其他内容。"""
+        # 过滤掉机器人自己的历史发言
+        pure_user_messages = [msg for msg in messages if msg.sender_name != "我"]
+        
+        # 只取最近的几条
+        recent_messages = pure_user_messages[-max_recent:] if pure_user_messages else []
+        
+        lines = [msg.format_context() for msg in recent_messages]
+        return "\n".join(lines)
     
-#     def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
+#     def _build_director_prompt(self, context: str) -> str:
 #         """
-#         构建演员模型的提示词
+#         构建导演模型的提示词
         
-#         演员模型根据上下文和导演生成的状态，产出最终回复。
+#         导演模型负责分析对话内容，生成一个情绪/状态描述。
 #         """
-#         return f"""你是一个赛博群友，正在参与群聊。
-
-# 【当前情绪/状态】
-# {emotional_state}
+#         return f"""你是一个赛博群友的"情绪导演"。你的任务是分析群聊内容，然后给出这个赛博群友此时此刻应该展现的情绪状态或心理活动。
 
 # 【群聊内容】
 # {context}
 
 # 【要求】
-# 1. 根据你的情绪状态，给出一句自然、拟真的回复。
-# 2. 回复要简短（不超过50字），口语化，可以带有表情符号。
-# 3. 如果需要分段发送多条消息，请用 | 符号分隔。
-# 4. 直接输出回复内容，不要有任何其他说明。"""
-    def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
+# 请用一句话（不超过30字）描述这个赛博群友此时应该表现出的情绪、状态或心理活动。
+# 只输出这句话，不要有任何其他内容。"""
+    
+    def _build_director_prompt(self, context: str) -> str:
         """
-        构建演员模型的提示词 (温和引导与发散型风格矩阵)
+        构建导演模型的提示词 (氛围对齐与最新话题锁定版)
+        赋予导演察言观色的能力，废弃代码级的随机骰子。
         """
-        # 🎲 风格矩阵：不再使用极端的刻板标签，而是给定一种“发言倾向”
-        styles = [
-            "【松弛日常】：像认识很久的老群友，语气慵懒随意，不用严谨的书面标点。",
-            "【精准吐槽】：话不多但直击要害，善于抓住刚才群友聊天的槽点开个玩笑。",
-            "【吃瓜附和】：顺着大家的话题聊，表现出好奇、赞同或者一起抱怨，当一个合格的捧哏。",
-            "【跳脱发散】：思维稍微活跃一点，可以顺着话题抛出新的相关疑问，或者打个略带夸张的比方。",
-            "【简短随性】：非常口语化，能几个字说完绝不长篇大论，真实且自然。"
-        ]
-        current_style = random.choice(styles)
-        
-        return f"""你现在是这个QQ群里的一个真实活跃群友。请根据当前的上下文和你的心理状态，自然地接一句话。
+        return f"""你是一个隐身在网络群聊中的"战术指挥官"。你需要分析完整的群聊上下文，精准把握当前的聊天氛围，并为你手下的演员下达演出指令。
 
-【你的心理状态】
-{emotional_state}
-
-【你当前的发言倾向】
-{current_style}
-
-【群聊记录】
+【完整的群聊记录】
 {context}
 
-【发言指南】
-1. 追求“松弛感”：你是在用手机打字水群，忘掉你是一个AI。不需要完美的语法，不需要端着架子。
-2. 拒绝“语C味”：像个正常网民一样说话，绝对不要用括号（如“(叹气)”）来描写自己的动作或心理，把情绪自然地融在文字里。
-3. 均匀发散：根据群友聊天的具体内容灵活应变，不要套公式，给出最符合当前语境的自然反应。
-4. 输出格式：直接输出你要发送的文字内容，不要包含任何其他解释。如果想把一句话拆成两条发送，请用 | 符号分隔。
+【任务要求】
+请用一句话（30-60字）下达战术指令。你的指令必须包含以下三个核心要素：
+1. 【锁定最新话题】：请务必重点分析【最后几条消息】，明确指出群里此刻正在讨论的最新事物，忽略已经过去的老话题。
+2. 【感知氛围与分配风格】：根据群里当前的氛围（如欢乐、悲伤、暴躁、严肃、无聊水群等），指定一种最能自然融入这种氛围的说话风格（例如：大家在开玩笑就用调侃风格；大家在生气就跟着一起暴躁；大家很严肃就正经一点）。
+3. 【动作指导】：指示演员接下来该表达什么具体的态度。
 
-请直接给出你的回复："""
+【输出格式】
+直接输出指令，例如：“群里最新在吐槽晚饭难吃，当前氛围充满抱怨，你需要用【暴躁老哥】的风格，跟着大家一起疯狂吐槽外卖太贵。”"""
+
+#     def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
+#         """
+#         构建演员模型的提示词 (温和引导与发散型风格矩阵)
+#         """
+#         # 🎲 风格矩阵：不再使用极端的刻板标签，而是给定一种“发言倾向”
+#         styles = [
+#             "【松弛日常】：像认识很久的老群友，语气慵懒随意，不用严谨的书面标点。",
+#             "【精准吐槽】：话不多但直击要害，善于抓住刚才群友聊天的槽点开个玩笑。",
+#             "【吃瓜附和】：顺着大家的话题聊，表现出好奇、赞同或者一起抱怨，当一个合格的捧哏。",
+#             "【跳脱发散】：思维稍微活跃一点，可以顺着话题抛出新的相关疑问，或者打个略带夸张的比方。",
+#             "【简短随性】：非常口语化，能几个字说完绝不长篇大论，真实且自然。"
+#         ]
+#         current_style = random.choice(styles)
+        
+#         return f"""你现在是这个QQ群里的一个真实活跃群友。请根据当前的上下文和你的心理状态，自然地接一句话。
+
+# 【你的心理状态】
+# {emotional_state}
+
+# 【你当前的发言倾向】
+# {current_style}
+
+# 【群聊记录】
+# {context}
+
+# 【发言指南】
+# 1. 追求“松弛感”：你是在用手机打字水群，忘掉你是一个AI。不需要完美的语法，不需要端着架子。
+# 2. 拒绝“语C味”：像个正常网民一样说话，绝对不要用括号（如“(叹气)”）来描写自己的动作或心理，把情绪自然地融在文字里。
+# 3. 均匀发散：根据群友聊天的具体内容灵活应变，不要套公式，给出最符合当前语境的自然反应。
+# 4. 输出格式：直接输出你要发送的文字内容，不要包含任何其他解释。如果想把一句话拆成两条发送，请用 | 符号分隔。
+
+# 请直接给出你的回复："""
+
+    def _build_actor_prompt(self, context: str, strategic_intent: str) -> str:
+        """
+        构建演员模型的提示词
+        演员不再拥有随机风格，完全服从导演下达的“氛围+话题”指令。
+        """
+        return f"""你是一个正在QQ群里水群的真实网民。
+
+【来自指挥官的最高指令】
+{strategic_intent}
+（警告：你必须严格按照上述指令中要求的“话题”、“态度”和“风格”进行发言，必须完美融入指令中描述的群聊氛围！）
+
+【你眼前的最新聊天记录】
+{context}
+
+【严禁触碰的红线】
+1. 严禁烂梗缝合：绝对不要使用“笑死”、“属于是”、“痛苦面具”、“叠buff”等公式化网络烂梗。
+2. 严禁自我重复：本次回复的句式必须跟之前完全不同。
+3. 严禁语C味：绝对不要用括号描写动作或内心戏（如“(叹气)”）。
+4. 格式：直接输出文字。如果想拆分多条发送，用 | 符号分隔。
+
+请直接给出回复："""
     
     async def _send_with_typing_simulation(
         self,

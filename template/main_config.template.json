@@ -1,24 +1,25 @@
 {
-    "_comment": "LessBot 主配置文件模板 - 复制此文件为 main_config.json",
+    "_comment": "LessBot 主配置文件模板 - 复制此文件为 main_config.json 并放入项目根目录",
     
     "bot": {
         "name": "LessBot",
         "version": "1.0.0",
         "description": "高度模块化的异步 QQ 机器人"
     },
-    
     "behavior": {
-        "debounce_seconds": 3.0,
+        "debounce_seconds": 5.0,
         "typing_delay_min": 0.8,
         "typing_delay_max": 1.5,
-        "max_context_messages": 50
+        "max_context_messages": 50,
+        "reply_probability": 0.8,
+        "allowed_groups": [
+            1087317654
+        ]
     },
-    
     "models": {
         "director": "deepseek-chat",
         "actor": "deepseek-chat"
     },
-    
     "logging": {
         "level": "INFO",
         "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",

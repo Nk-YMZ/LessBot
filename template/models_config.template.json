@@ -1,6 +1,6 @@
 {
 
-    "_comment": "LessBot 模型配置模板 - 复制此文件为 models_config.json 并填入真实 API Key",
+    "_comment": "LessBot 模型配置模板 - 复制此文件为 models_config.json ，填入真实 API Key 并放入项目根目录",
     
     "api_keys": {
         "openai": "${OPENAI_API_KEY:你的OpenAI密钥}",

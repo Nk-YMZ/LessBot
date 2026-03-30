@@ -1,5 +1,5 @@
 {
-    "_comment": "NapCat WebSocket 连接配置模板 - 复制此文件为 napcat_config.json",
+    "_comment": "NapCat WebSocket 连接配置模板 - 复制此文件为 napcat_config.json 并放入项目根目录",
     
     "napcat": {
         "host": "${NAPCAT_HOST:127.0.0.1}",
