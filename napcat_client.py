@@ -171,10 +171,20 @@ class NapCatClient:
         
         return url
     
+    # @property
+    # def is_connected(self) -> bool:
+    #     """返回当前连接状态"""
+    #     return self._connected and self._ws is not None and self._ws.open
+    
     @property
     def is_connected(self) -> bool:
         """返回当前连接状态"""
-        return self._connected and self._ws is not None and self._ws.open
+        if not self._connected or self._ws is None:
+            return False
+        
+        # 兼容最新版 websockets (用 closed 替代被废弃的 open 属性)
+        is_closed = getattr(self._ws, 'closed', False)
+        return not is_closed
     
     async def _heartbeat_loop(self) -> None:
         """

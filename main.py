@@ -49,6 +49,8 @@ class BotConfig:
     typing_delay_min: float = 0.8
     typing_delay_max: float = 1.5
     max_context_messages: int = 50
+    reply_probability: float = 0.5
+    allowed_groups: List[int] = field(default_factory=list)
     
     # 模型配置
     director_model: str = "deepseek-chat"
@@ -96,6 +98,8 @@ class BotConfig:
                 typing_delay_min=float(behavior.get('typing_delay_min', 0.8)),
                 typing_delay_max=float(behavior.get('typing_delay_max', 1.5)),
                 max_context_messages=int(behavior.get('max_context_messages', 50)),
+                reply_probability=float(behavior.get('reply_probability', 0.5)),
+                allowed_groups=behavior.get('allowed_groups', []),
                 director_model=models.get('director', 'deepseek-chat'),
                 actor_model=models.get('actor', 'deepseek-chat'),
                 log_level=log_cfg.get('level', 'INFO'),
@@ -261,7 +265,9 @@ class GroupLLMHandler(MessageHandler):
         typing_delay_max: float = 1.5,
         max_context_messages: int = 50,
         director_model: str = "deepseek-chat",
-        actor_model: str = "deepseek-chat"
+        actor_model: str = "deepseek-chat",
+        allowed_groups: List[int] = None,
+        reply_probability: float = 0.5
     ):
         """
         初始化群聊 LLM 处理器
@@ -284,6 +290,8 @@ class GroupLLMHandler(MessageHandler):
         self._max_context_messages = max_context_messages
         self._director_model = director_model
         self._actor_model = actor_model
+        self._allowed_groups = allowed_groups or []
+        self._reply_probability = reply_probability
         
         # 消息缓冲池字典：{group_id: MessageBuffer}
         self._buffers: Dict[int, MessageBuffer] = {}
@@ -321,7 +329,9 @@ class GroupLLMHandler(MessageHandler):
             typing_delay_max=config.typing_delay_max,
             max_context_messages=config.max_context_messages,
             director_model=config.director_model,
-            actor_model=config.actor_model
+            actor_model=config.actor_model,
+            allowed_groups=config.allowed_groups,
+            reply_probability=config.reply_probability
         )
     
     def _get_lock(self, group_id: int) -> asyncio.Lock:
@@ -347,6 +357,10 @@ class GroupLLMHandler(MessageHandler):
         # 检查是否有文本内容
         raw_message = event.get('raw_message', '')
         if not raw_message or not raw_message.strip():
+            return False
+        
+        group_id = event.get('group_id')
+        if self._allowed_groups and group_id not in self._allowed_groups:
             return False
         
         return True
@@ -457,9 +471,14 @@ class GroupLLMHandler(MessageHandler):
             
             # 提取消息（消费掉缓冲池）
             messages = buffer.messages.copy()
-            buffer.messages.clear()
+            # buffer.messages.clear()
             
             logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
+
+        # 【新增：高冷掷骰子逻辑】
+        if random.random() > self._reply_probability:
+            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持高冷，不予回复。")
+            return
         
         # 拼装上下文
         context = self._build_context(messages)
@@ -497,6 +516,24 @@ class GroupLLMHandler(MessageHandler):
             
             # 【物理层模拟】分段发送
             await self._send_with_typing_simulation(group_id, reply, client)
+
+            # 🧠 【新增：记忆烙印】把自己说的话也记进历史池，免得下次接不上自己的梗！
+            async with lock:
+                # 重新获取 buffer，因为在 await 大模型期间，可能又有新消息进来了
+                buffer = self._buffers.get(group_id)
+                if buffer is not None:
+                    bot_msg = GroupMessage(
+                        group_id=group_id,
+                        user_id=0,  # 随便给个 0 代表机器人自己
+                        raw_message=reply.replace('|', ''),  # 把分段符去掉存入记忆
+                        sender_name="我",  # 告诉大模型这是它自己说的话
+                        timestamp=time.time()
+                    )
+                    buffer.messages.append(bot_msg)
+                    
+                    # 严格控制记忆容量，顶出最老的消息
+                    if len(buffer.messages) > self._max_context_messages:
+                        buffer.messages = buffer.messages[-self._max_context_messages:]
             
         except Exception as e:
             logger.error(f"[群{group_id}] 处理异常: {type(e).__name__}: {e}")
@@ -525,25 +562,57 @@ class GroupLLMHandler(MessageHandler):
 请用一句话（不超过30字）描述这个赛博群友此时应该表现出的情绪、状态或心理活动。
 只输出这句话，不要有任何其他内容。"""
     
+#     def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
+#         """
+#         构建演员模型的提示词
+        
+#         演员模型根据上下文和导演生成的状态，产出最终回复。
+#         """
+#         return f"""你是一个赛博群友，正在参与群聊。
+
+# 【当前情绪/状态】
+# {emotional_state}
+
+# 【群聊内容】
+# {context}
+
+# 【要求】
+# 1. 根据你的情绪状态，给出一句自然、拟真的回复。
+# 2. 回复要简短（不超过50字），口语化，可以带有表情符号。
+# 3. 如果需要分段发送多条消息，请用 | 符号分隔。
+# 4. 直接输出回复内容，不要有任何其他说明。"""
     def _build_actor_prompt(self, context: str, emotional_state: str) -> str:
         """
-        构建演员模型的提示词
-        
-        演员模型根据上下文和导演生成的状态，产出最终回复。
+        构建演员模型的提示词 (温和引导与发散型风格矩阵)
         """
-        return f"""你是一个赛博群友，正在参与群聊。
+        # 🎲 风格矩阵：不再使用极端的刻板标签，而是给定一种“发言倾向”
+        styles = [
+            "【松弛日常】：像认识很久的老群友，语气慵懒随意，不用严谨的书面标点。",
+            "【精准吐槽】：话不多但直击要害，善于抓住刚才群友聊天的槽点开个玩笑。",
+            "【吃瓜附和】：顺着大家的话题聊，表现出好奇、赞同或者一起抱怨，当一个合格的捧哏。",
+            "【跳脱发散】：思维稍微活跃一点，可以顺着话题抛出新的相关疑问，或者打个略带夸张的比方。",
+            "【简短随性】：非常口语化，能几个字说完绝不长篇大论，真实且自然。"
+        ]
+        current_style = random.choice(styles)
+        
+        return f"""你现在是这个QQ群里的一个真实活跃群友。请根据当前的上下文和你的心理状态，自然地接一句话。
 
-【当前情绪/状态】
+【你的心理状态】
 {emotional_state}
 
-【群聊内容】
+【你当前的发言倾向】
+{current_style}
+
+【群聊记录】
 {context}
 
-【要求】
-1. 根据你的情绪状态，给出一句自然、拟真的回复。
-2. 回复要简短（不超过50字），口语化，可以带有表情符号。
-3. 如果需要分段发送多条消息，请用 | 符号分隔。
-4. 直接输出回复内容，不要有任何其他说明。"""
+【发言指南】
+1. 追求“松弛感”：你是在用手机打字水群，忘掉你是一个AI。不需要完美的语法，不需要端着架子。
+2. 拒绝“语C味”：像个正常网民一样说话，绝对不要用括号（如“(叹气)”）来描写自己的动作或心理，把情绪自然地融在文字里。
+3. 均匀发散：根据群友聊天的具体内容灵活应变，不要套公式，给出最符合当前语境的自然反应。
+4. 输出格式：直接输出你要发送的文字内容，不要包含任何其他解释。如果想把一句话拆成两条发送，请用 | 符号分隔。
+
+请直接给出你的回复："""
     
     async def _send_with_typing_simulation(
         self,

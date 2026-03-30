@@ -24,3 +24,4 @@ env/
 # ========================
 *.log
 .DS_Store
+napcat_data/
