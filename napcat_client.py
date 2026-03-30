@@ -221,13 +221,14 @@ class NapCatClient:
             post_type = event_data.get('post_type', 'unknown')
             logger.debug(f"收到消息 [type={post_type}]: {raw_message[:200]}")
             
-            # 触发外部回调
+            # 触发外部回调（在独立任务中执行，避免阻塞消息接收循环）
             if self._message_callback:
                 try:
-                    # 支持同步和异步回调
+                    # 支持同步和异步回调，在后台任务中执行
                     result = self._message_callback(event_data)
                     if asyncio.iscoroutine(result):
-                        await result
+                        # 创建独立任务执行，不阻塞当前循环
+                        asyncio.create_task(result)
                 except Exception as e:
                     logger.error(f"消息回调执行异常: {e}")
                     
