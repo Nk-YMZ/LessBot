@@ -493,65 +493,55 @@ def get_client(config_path: Optional[str] = None) -> NapCatClient:
         _client_instance = NapCatClient(config_path)
     return _client_instance
 
+# ============================================================
+# 模块级便捷函数
+# ============================================================
+
+_client_instance: Optional[NapCatClient] = None
+
+def get_client(config_path: Optional[str] = None) -> NapCatClient:
+    """获取全局 NapCat 客户端实例"""
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = NapCatClient(config_path)
+    return _client_instance
 
 # ============================================================
-# 测试代码
+# 测试代码 (正确封顶版)
 # ============================================================
 
 async def _test_napcat_client():
-    """
-    测试函数：演示如何使用 NapCat 客户端
-    """
-    # 配置日志输出
+    """测试函数"""
+    # 1. 设置极其简单的日志，方便你在控制台看清动作
     logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S'
     )
     
-    # 定义消息回调函数
-    async def on_message(event_data: dict):
-        """处理收到的消息事件"""
-        post_type = event_data.get('post_type')
-        
+    # 2. 定义一个模拟的外部大脑回调
+    async def dummy_on_message(event):
+        post_type = event.get('post_type')
         if post_type == 'message':
-            # 消息类型事件
-            message_type = event_data.get('message_type')
-            user_id = event_data.get('user_id')
-            message = event_data.get('raw_message', '')
-            
-            print(f"\n收到消息 [{message_type}] 用户{user_id}: {message}")
-            
-            # 示例：回复群消息
-            if message_type == 'group':
-                group_id = event_data.get('group_id')
-                if message.strip() == 'ping':
-                    await client.send_group_msg(group_id, 'pong!')
-                    
+            print(f"👉 拦截到群/私聊消息: {event.get('raw_message')}")
         elif post_type == 'meta_event':
-            # 元事件（如连接成功、心跳等）
-            meta_event_type = event_data.get('meta_event_type')
-            print(f"元事件: {meta_event_type}")
-            
-        else:
-            print(f"其他事件: {post_type}")
-    
-    # 创建客户端实例
-    client = NapCatClient()
-    
+            pass # 忽略无聊的心跳事件
+
+    # 3. 实例化并启动
+    client = get_client()
     print("=" * 50)
-    print("NapCat 客户端测试")
+    print("🛠️ NapCat 客户端独立测试启动")
     print("=" * 50)
-    print(f"配置: {client._config}")
-    print(f"连接 URL: {client._build_ws_url().split('?')[0]}")
-    print("\n按 Ctrl+C 停止...\n")
     
     try:
-        # 启动客户端（会阻塞）
-        await client.start(on_message)
-    except KeyboardInterrupt:
-        print("\n正在停止...")
+        await client.start(dummy_on_message)
+    except asyncio.CancelledError:
+        print("\n正在优雅停止...")
+    finally:
         await client.stop()
 
-
 if __name__ == "__main__":
-    asyncio.run(_test_napcat_client())
+    try:
+        asyncio.run(_test_napcat_client())
+    except KeyboardInterrupt:
+        print("测试手动终止。")

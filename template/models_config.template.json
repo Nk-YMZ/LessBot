@@ -1,10 +1,13 @@
 {
+
+    "_comment": "LessBot 模型配置模板 - 复制此文件为 models_config.json 并填入真实 API Key",
+    
     "api_keys": {
-        "openai": "${OPENAI_API_KEY:sk-xxx}",
-        "deepseek": "${DEEPSEEK_API_KEY:sk-xxx}",
-        "siliconflow": "${SILICONFLOW_API_KEY:sk-xxx}",
-        "anthropic": "${ANTHROPIC_API_KEY:sk-xxx}",
-        "custom": "${CUSTOM_API_KEY:sk-xxx}"
+        "openai": "${OPENAI_API_KEY:你的OpenAI密钥}",
+        "deepseek": "${DEEPSEEK_API_KEY:你的DeepSeek密钥}",
+        "siliconflow": "${SILICONFLOW_API_KEY:你的SiliconFlow密钥}",
+        "anthropic": "${ANTHROPIC_API_KEY:你的Anthropic密钥}",
+        "custom": "${CUSTOM_API_KEY:你的自定义API密钥}"
     },
     
     "models": {
@@ -12,11 +15,6 @@
             "api_url": "https://api.openai.com/v1/chat/completions",
             "api_key": "${api_keys.openai}",
             "model": "gpt-4o"
-        },
-        "gpt-4o-mini": {
-            "api_url": "https://api.openai.com/v1/chat/completions",
-            "api_key": "${api_keys.openai}",
-            "model": "gpt-4o-mini"
         },
         "deepseek-chat": {
             "api_url": "https://api.deepseek.com/v1/chat/completions",
