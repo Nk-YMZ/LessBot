@@ -461,6 +461,11 @@ class GroupLLMHandler(MessageHandler):
             # 将视觉翻译结果悄悄附加在消息文字后面
             clean_message += f" (视觉系统提示：{', '.join(descriptions)})"
 
+        # 🎯 【新增：把生硬的被艾特CQ码，直接翻译成"@我"】
+        if is_at_me:
+            # 这样大模型在看聊天记录时，看到的就是真实的“@我”，瞬间建立第一人称认知
+            clean_message = clean_message.replace(f"[CQ:at,qq={self_id}]", "@我 ")
+
         # 构建消息对象
         msg = GroupMessage(
             group_id=group_id,
@@ -578,7 +583,7 @@ class GroupLLMHandler(MessageHandler):
         try:
             # 【导演模型】推演核心逻辑和状态 (使用 full_context)
             logger.info(f"[群{group_id}] 调用导演模型 ({self._director_model})...")
-            director_prompt = self._build_director_prompt(full_context)
+            director_prompt = self._build_director_prompt(full_context, is_at_me=force_reply)
             strategic_intent = await ask_llm(
                 model_name=self._director_model,
                 prompt_content=director_prompt
@@ -670,10 +675,13 @@ class GroupLLMHandler(MessageHandler):
 
 直接输出这句话："""
 
-    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "") -> str:
+    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "", is_at_me: bool = False) -> str:
         """
         极简版演员提示词
         """
+
+        at_warning = "\n【注意】：刚才的聊天中群友专门 @ 了你！你必须明确意识到自己是“被搭话的人”，并在指令中要求演员以“被点名者”的第一人称视角来回应！" if is_at_me else ""
+
         return f"""你是这个QQ群里的普通群友。
 
 【回复方向】
