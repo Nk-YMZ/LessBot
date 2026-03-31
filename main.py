@@ -359,6 +359,9 @@ class GroupLLMHandler(MessageHandler):
         
         # 防抖锁，防止并发操作同一群的缓冲区
         self._buffer_locks: Dict[int, asyncio.Lock] = {}
+
+        # 防并发锁，记录某个群是否正在调用大模型
+        self._is_processing: Dict[int, bool] = {}
         
         logger.info(
             f"GroupLLMHandler 初始化完成: "
@@ -550,41 +553,141 @@ class GroupLLMHandler(MessageHandler):
         3. 调用演员模型生成回复
         4. 物理层模拟发送
         """
-        lock = self._get_lock(group_id)
+        # # 【防并发锁】如果大脑还在转，直接忽略这次多余的触发
+        # if self._is_processing.get(group_id, False):
+        #     logger.info(f"[群{group_id}] 🧠 大脑正在运转，跳过本次重叠的防抖触发...")
+        #     return
+            
+        # self._is_processing[group_id] = True  # 🔒 上锁：大脑开始思考
         
-        async with lock:
-            buffer = self._buffers.get(group_id)
-            if not buffer or not buffer.messages:
-                return
+        # lock = self._get_lock(group_id)
+        
+        # async with lock:
+        #     buffer = self._buffers.get(group_id)
+        #     if not buffer or not buffer.messages:
+        #         return
             
-            # 提取消息（消费掉缓冲池）
-            messages = buffer.messages.copy()
+        #     # 提取消息（消费掉缓冲池）
+        #     messages = buffer.messages.copy()
             
-            force_reply = any(msg.is_at_me for msg in messages)
-            for msg in buffer.messages:
-                msg.is_at_me = False
+        #     force_reply = any(msg.is_at_me for msg in messages)
+        #     for msg in buffer.messages:
+        #         msg.is_at_me = False
             
-            logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
+        #     logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
 
-        # 【掷骰子逻辑】如果没有人 @ 我，才去乖乖摇骰子
-        if not force_reply and random.random() > self._reply_probability:
-            logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
+        # # 【掷骰子逻辑】如果没有人 @ 我，才去乖乖摇骰子
+        # if not force_reply and random.random() > self._reply_probability:
+        #     logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
+        #     return
+        # elif force_reply:
+        #     logger.info(f"[群{group_id}] 🔔 触发 @ 必回 ，无视概率，强制回复")
+        
+        # # 1. 导演看全景图（完整的 50 条记忆）
+        # full_context = self._build_context(messages)
+        
+        # # 2. 演员看纯净短切片（只看最近8条纯用户发言）
+        # actor_context = self._build_actor_context(messages, max_recent=8)
+
+        # # 🧠 【新增】：捞出机器人自己最近说过的 3 句话，用作防重复警告
+        # recent_self_msgs = [msg.raw_message for msg in messages if msg.sender_name == "我"][-3:]
+        # recent_self_str = "\n".join(recent_self_msgs) if recent_self_msgs else "无"
+        
+        # try:
+        #     # 【导演模型】推演核心逻辑和状态 (使用 full_context)
+        #     logger.info(f"[群{group_id}] 调用导演模型 ({self._director_model})...")
+        #     director_prompt = self._build_director_prompt(full_context, is_at_me=force_reply)
+        #     strategic_intent = await ask_llm(
+        #         model_name=self._director_model,
+        #         prompt_content=director_prompt
+        #     )
+            
+        #     # 检查导演模型是否返回错误
+        #     if strategic_intent.startswith("[LLM"):
+        #         logger.error(f"[群{group_id}] 导演模型调用失败: {strategic_intent}")
+        #         return
+            
+        #     logger.info(f"[群{group_id}] 导演指令: {strategic_intent}")
+            
+        #     # 【演员模型】根据指令生成最终回复 (使用 actor_context！)
+        #     logger.info(f"[群{group_id}] 调用演员模型 ({self._actor_model})...")
+        #     actor_prompt = self._build_actor_prompt(actor_context, strategic_intent, recent_self_str)
+        #     reply = await ask_llm(
+        #         model_name=self._actor_model,
+        #         prompt_content=actor_prompt
+        #     )
+            
+        #     # 检查演员模型是否返回错误
+        #     if reply.startswith("[LLM"):
+        #         logger.error(f"[群{group_id}] 演员模型调用失败: {reply}")
+        #         return
+            
+        #     logger.info(f"[群{group_id}] 演员最终回复: {reply}")
+            
+        #     # 【物理层模拟】分段发送
+        #     await self._send_with_typing_simulation(group_id, reply, client)
+
+        #     # 🧠 【新增：记忆烙印】把自己说的话也记进历史池
+        #     async with lock:
+        #         # 重新获取 buffer，因为在 await 大模型期间，可能又有新消息进来了
+        #         buffer = self._buffers.get(group_id)
+        #         if buffer is not None:
+        #             bot_msg = GroupMessage(
+        #                 group_id=group_id,
+        #                 user_id=0,  # 随便给个 0 代表机器人自己
+        #                 raw_message=reply.replace('|', ''),  # 把分段符去掉存入记忆
+        #                 sender_name="我",  # 告诉大模型这是它自己说的话
+        #                 timestamp=time.time()
+        #             )
+        #             buffer.messages.append(bot_msg)
+                    
+        #             # 严格控制记忆容量，顶出最老的消息
+        #             if len(buffer.messages) > self._max_context_messages:
+        #                 buffer.messages = buffer.messages[-self._max_context_messages:]
+            
+        # except Exception as e:
+        #     logger.error(f"[群{group_id}] 处理异常: {type(e).__name__}: {e}")
+
+    # 【防并发锁】如果大脑还在转，直接忽略这次多余的触发
+        if self._is_processing.get(group_id, False):
+            logger.info(f"[群{group_id}] 🧠 大脑正在运转，跳过本次重叠的防抖触发...")
             return
-        elif force_reply:
-            logger.info(f"[群{group_id}] 🔔 触发 @ 必回 ，无视概率，强制回复")
-        
-        # 1. 导演看全景图（完整的 50 条记忆）
-        full_context = self._build_context(messages)
-        
-        # 2. 演员看纯净短切片（只看最近8条纯用户发言）
-        actor_context = self._build_actor_context(messages, max_recent=8)
-
-        # 🧠 【新增】：捞出机器人自己最近说过的 3 句话，用作防重复警告
-        recent_self_msgs = [msg.raw_message for msg in messages if msg.sender_name == "我"][-3:]
-        recent_self_str = "\n".join(recent_self_msgs) if recent_self_msgs else "无"
+            
+        self._is_processing[group_id] = True  # 🔒 上锁：大脑开始思考
         
         try:
-            # 【导演模型】推演核心逻辑和状态 (使用 full_context)
+            lock = self._get_lock(group_id)
+            
+            async with lock:
+                buffer = self._buffers.get(group_id)
+                if not buffer or not buffer.messages:
+                    return
+                
+                # 提取消息
+                messages = buffer.messages.copy()
+                
+                force_reply = any(msg.is_at_me for msg in messages)
+                for msg in buffer.messages:
+                    msg.is_at_me = False
+                
+                logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
+
+            # 【掷骰子逻辑】
+            if not force_reply and random.random() > self._reply_probability:
+                logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
+                return
+            elif force_reply:
+                logger.info(f"[群{group_id}] 🔔 触发 @ 必回 ，无视概率，强制回复")
+            
+            # 1. 导演看全景图（完整的 50 条记忆）
+            full_context = self._build_context(messages)
+            
+            # 2. 演员看纯净短切片
+            actor_context = self._build_actor_context(messages, max_recent=8)
+
+            # (⚠️ 这里原本的 recent_self_msgs 已经被彻底删除了)
+            
+            # 【导演模型】推演核心逻辑和状态
             logger.info(f"[群{group_id}] 调用导演模型 ({self._director_model})...")
             director_prompt = self._build_director_prompt(full_context, is_at_me=force_reply)
             strategic_intent = await ask_llm(
@@ -592,51 +695,50 @@ class GroupLLMHandler(MessageHandler):
                 prompt_content=director_prompt
             )
             
-            # 检查导演模型是否返回错误
             if strategic_intent.startswith("[LLM"):
                 logger.error(f"[群{group_id}] 导演模型调用失败: {strategic_intent}")
                 return
             
             logger.info(f"[群{group_id}] 导演指令: {strategic_intent}")
             
-            # 【演员模型】根据指令生成最终回复 (使用 actor_context！)
+            # 【演员模型】根据指令生成最终回复
             logger.info(f"[群{group_id}] 调用演员模型 ({self._actor_model})...")
-            actor_prompt = self._build_actor_prompt(actor_context, strategic_intent, recent_self_str)
+            # 🎯 【修改】不再传入 recent_self
+            actor_prompt = self._build_actor_prompt(actor_context, strategic_intent)
             reply = await ask_llm(
                 model_name=self._actor_model,
                 prompt_content=actor_prompt
             )
             
-            # 检查演员模型是否返回错误
             if reply.startswith("[LLM"):
                 logger.error(f"[群{group_id}] 演员模型调用失败: {reply}")
                 return
             
             logger.info(f"[群{group_id}] 演员最终回复: {reply}")
             
-            # 【物理层模拟】分段发送
+            # 分段发送
             await self._send_with_typing_simulation(group_id, reply, client)
 
-            # 🧠 【新增：记忆烙印】把自己说的话也记进历史池
+            # 把自己说的话也记进历史池
             async with lock:
-                # 重新获取 buffer，因为在 await 大模型期间，可能又有新消息进来了
                 buffer = self._buffers.get(group_id)
                 if buffer is not None:
                     bot_msg = GroupMessage(
                         group_id=group_id,
-                        user_id=0,  # 随便给个 0 代表机器人自己
-                        raw_message=reply.replace('|', ''),  # 把分段符去掉存入记忆
-                        sender_name="我",  # 告诉大模型这是它自己说的话
+                        user_id=0,
+                        raw_message=reply.replace('|', ''),
+                        sender_name="我",
                         timestamp=time.time()
                     )
                     buffer.messages.append(bot_msg)
-                    
-                    # 严格控制记忆容量，顶出最老的消息
                     if len(buffer.messages) > self._max_context_messages:
                         buffer.messages = buffer.messages[-self._max_context_messages:]
-            
+                        
         except Exception as e:
             logger.error(f"[群{group_id}] 处理异常: {type(e).__name__}: {e}")
+        finally:
+            # 解锁：无论执行成功还是中途 return/报错，重置为空闲状态
+            self._is_processing[group_id] = False
     
     def _build_context(self, messages: List[GroupMessage]) -> str:
         """
@@ -649,17 +751,10 @@ class GroupLLMHandler(MessageHandler):
     
     def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 8) -> str:
         """
-        【架构级隔离】构建演员专属的纯净上下文
-        
-        核心逻辑：
-        1. 过滤掉机器人自己 (sender_name="我") 过去的所有发言，彻底切断自我洗脑的路径。
-        2. 只保留最近的 max_recent 条真实用户的发言，让演员只针对眼前的对话做出反应。
+        构建演员专属的纯净上下文
         """
-        # 过滤掉机器人自己的历史发言
-        pure_user_messages = [msg for msg in messages if msg.sender_name != "我"]
-        
-        # 只取最近的几条
-        recent_messages = pure_user_messages[-max_recent:] if pure_user_messages else []
+        # 直接截取最近的聊天记录，不进行自我过滤
+        recent_messages = messages[-max_recent:] if messages else []
         
         lines = [msg.format_context() for msg in recent_messages]
         return "\n".join(lines)
@@ -671,7 +766,7 @@ class GroupLLMHandler(MessageHandler):
         at_warning = "（注意：最新消息有人@了你，请给出针对性的回应策略）" if is_at_me else ""
         return f"""阅读以下群聊记录，用一句话生成回复策略：
 分析当前聊天氛围和情境下语义，并给出符合情景的简短回复方向。{at_warning}
-（只需给出客观策略，不要生成具体台词,不要强行展开话题或反问）
+（只需给出客观策略，不要生成具体台词；不要强行展开话题或反问；面对群友跳跃、毫无关联的多个话题时，只需抓住最新或最核心的一个话题进行回应，绝对不要试图把不相干的话题强行缝合在一起）
 
 【群聊记录】
 {context}
@@ -689,16 +784,14 @@ class GroupLLMHandler(MessageHandler):
 【回复策略】
 {strategic_intent}
 
-【你最近说过的话】(避免重复)
-{recent_self}
-
-【最近的聊天记录】
+【最近的聊天记录】(记录中带有 [我] 的发言就是你自己过去说的话)
 {context}
 
 【要求】
 1. 不要强行展开话题或反问，顺其自然。
 2. 不要用括号写内心戏，不要有任何机器感。
 3. 若策略提示当前在玩梗或开玩笑，请配合该氛围。
+4. 遇到多个毫不相干的跳跃话题时，只需顺着最想吐槽的或最新的那一个接话即可。
 
 直接输出你的回复文字（如果要分段发，用 | 符号分隔）："""
     
