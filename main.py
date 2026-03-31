@@ -9,6 +9,7 @@ LessBot 核心调度中枢 (Core Dispatcher)
 5. 配置驱动的外部化参数管理
 """
 
+import os
 import asyncio
 import logging
 from typing import Optional
@@ -16,6 +17,11 @@ from typing import Optional
 from napcat_client import get_client, NapCatClient
 from config import BotConfig
 from handlers import MessageHandler, GroupLLMHandler
+
+PROXY_URL = "http://127.0.0.1:7897"
+os.environ["HTTP_PROXY"] = PROXY_URL
+os.environ["HTTPS_PROXY"] = PROXY_URL
+os.environ["ALL_PROXY"] = PROXY_URL
 
 # ============================================================
 # 日志配置
