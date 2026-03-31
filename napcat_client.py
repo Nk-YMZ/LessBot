@@ -487,7 +487,6 @@ class NapCatClient:
 
 _client_instance: Optional[NapCatClient] = None
 
-
 def get_client(config_path: Optional[str] = None) -> NapCatClient:
     """
     获取全局 NapCat 客户端实例
@@ -498,19 +497,6 @@ def get_client(config_path: Optional[str] = None) -> NapCatClient:
     Returns:
         NapCatClient 实例
     """
-    global _client_instance
-    if _client_instance is None:
-        _client_instance = NapCatClient(config_path)
-    return _client_instance
-
-# ============================================================
-# 模块级便捷函数
-# ============================================================
-
-_client_instance: Optional[NapCatClient] = None
-
-def get_client(config_path: Optional[str] = None) -> NapCatClient:
-    """获取全局 NapCat 客户端实例"""
     global _client_instance
     if _client_instance is None:
         _client_instance = NapCatClient(config_path)

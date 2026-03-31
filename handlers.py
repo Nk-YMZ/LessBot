@@ -1,0 +1,626 @@
+"""
+LessBot 业务处理层
+
+包含消息处理器抽象基类、视觉分析器和群聊 LLM 处理器。
+"""
+
+import asyncio
+import base64
+import httpx
+import logging
+import random
+import re
+import time
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional
+
+from napcat_client import NapCatClient
+from llm_caller import ask_llm
+from config import BotConfig
+from models import GroupMessage, MessageBuffer
+
+# ============================================================
+# 日志配置
+# ============================================================
+
+logger = logging.getLogger("LessBot")
+
+
+# ============================================================
+# 处理器抽象基类（责任链模式）
+# ============================================================
+
+class MessageHandler(ABC):
+    """
+    消息处理器抽象基类
+    
+    所有业务处理器都应继承此类并实现 handle 方法。
+    处理器可以决定是否处理消息，以及是否继续传递给下一个处理器。
+    """
+    
+    def __init__(self, next_handler: Optional['MessageHandler'] = None):
+        """
+        初始化处理器
+        
+        Args:
+            next_handler: 责任链中的下一个处理器
+        """
+        self._next_handler = next_handler
+    
+    def set_next(self, handler: 'MessageHandler') -> 'MessageHandler':
+        """
+        设置下一个处理器（便于链式调用）
+        
+        Args:
+            handler: 下一个处理器实例
+            
+        Returns:
+            传入的处理器实例，便于链式构建
+        """
+        self._next_handler = handler
+        return handler
+    
+    @abstractmethod
+    async def can_handle(self, event: dict) -> bool:
+        """
+        判断是否可以处理该事件
+        
+        Args:
+            event: 原始事件数据
+            
+        Returns:
+            True 表示可以处理，False 表示跳过
+        """
+        pass
+    
+    @abstractmethod
+    async def handle(self, event: dict, client: NapCatClient) -> bool:
+        """
+        处理消息事件
+        
+        Args:
+            event: 原始事件数据
+            client: NapCat 客户端实例，用于发送消息
+            
+        Returns:
+            True 表示已处理，不需要继续传递；
+            False 表示未处理或需要继续传递
+        """
+        pass
+    
+    async def process(self, event: dict, client: NapCatClient) -> bool:
+        """
+        责任链处理入口
+        
+        按照责任链顺序依次尝试处理，直到有处理器接收。
+        
+        Args:
+            event: 原始事件数据
+            client: NapCat 客户端实例
+            
+        Returns:
+            是否被任一处理器处理
+        """
+        # 检查当前处理器是否可以处理
+        if await self.can_handle(event):
+            handled = await self.handle(event, client)
+            if handled:
+                return True
+        
+        # 传递给下一个处理器
+        if self._next_handler:
+            return await self._next_handler.process(event, client)
+        
+        return False
+
+
+# ============================================================
+# 视觉处理中枢 (Vision Analyzer)
+# ============================================================
+
+class VisionAnalyzer:
+    """
+    视觉中枢 (Base64 版)
+    """
+    @staticmethod
+    async def analyze(image_url: str, model_name: str) -> str:
+        try:
+            logger.info(f"👁️ 正在调用视觉模型 ({model_name}) 分析图片...")
+            
+            # 1. 清洗 URL（修复 CQ 码的 & 转义 Bug）
+            clean_url = image_url.replace('&', '&')
+            
+            # 2. 【核心绝招】本地下载并转为 Base64，彻底破解腾讯防盗链
+            try:
+                async with httpx.AsyncClient() as client:
+                    img_resp = await client.get(clean_url, timeout=5.0)
+                    if img_resp.status_code == 200:
+                        b64_data = base64.b64encode(img_resp.content).decode('utf-8')
+                        clean_url = f"data:image/jpeg;base64,{b64_data}"
+                        logger.info("✅ 图片已成功转为 Base64 内存直传模式")
+                    else:
+                        logger.warning(f"图片下载失败 (状态码 {img_resp.status_code})，尝试回退到 URL 模式")
+            except Exception as dl_e:
+                logger.warning(f"图片下载异常，尝试回退到 URL 模式: {dl_e}")
+            
+            # 3. 构造极简视觉提示词
+            vision_prompt = "你是一个群聊视觉助手。请简短描述这张图片的核心内容。如果是表情包请指出它的情绪，如果是梗图请解释，如果是文字截图请提取核心意思。字数严格控制在10-50字以内。"
+            
+            # 4. 调用大模型
+            description = await ask_llm(
+                model_name=model_name,
+                prompt_content=vision_prompt,
+                image_url=clean_url
+            )
+            
+            # 5. 拦截 llm_caller 抛上来的错误字符串，防止污染聊天记忆
+            if description.startswith("[LLM"):
+                logger.error(f"❌ 视觉 API 拒绝了请求: {description}")
+                return "一张无法显示的图片"
+            
+            # 🎯 【新增：打印视觉解析的最终结果】
+            result_text = description.strip()
+            logger.info(f"📸 视觉解析完成，提取画面特征：{result_text}")
+                
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"视觉分析发生未知异常: {e}")
+            return "无法看清的图片"
+
+
+# ============================================================
+# 群聊 LLM 处理器（核心业务逻辑）
+# ============================================================
+
+class GroupLLMHandler(MessageHandler):
+    """
+    群聊 LLM 处理器
+    
+    实现核心业务逻辑：
+    1. 滑动窗口防抖
+    2. 导演模型（状态生成）
+    3. 演员模型（回复生成）
+    4. 物理层模拟（真人化发送）
+    
+    所有参数通过构造函数注入，支持外部配置驱动。
+    """
+    
+    def __init__(
+        self,
+        next_handler: Optional[MessageHandler] = None,
+        debounce_seconds: float = 3.0,
+        typing_delay_min: float = 0.8,
+        typing_delay_max: float = 1.5,
+        max_context_messages: int = 50,
+        director_model: str = "deepseek-reasoner",
+        actor_model: str = "deepseek-chat",
+        vision_model: str = "qwen3.5-plus",
+        allowed_groups: List[int] = None,
+        reply_probability: float = 0.5
+    ):
+        """
+        初始化群聊 LLM 处理器
+        
+        Args:
+            next_handler: 责任链中的下一个处理器
+            debounce_seconds: 防抖时间窗口（秒）
+            typing_delay_min: 打字延迟下限（秒）
+            typing_delay_max: 打字延迟上限（秒）
+            max_context_messages: 最大上下文消息数
+            director_model: 导演模型名称（配置文件中的 key）
+            actor_model: 演员模型名称（配置文件中的 key）
+        """
+        super().__init__(next_handler)
+        
+        # 【配置注入】所有参数从外部传入，不再硬编码
+        self._debounce_seconds = debounce_seconds
+        self._typing_delay_min = typing_delay_min
+        self._typing_delay_max = typing_delay_max
+        self._max_context_messages = max_context_messages
+        self._director_model = director_model
+        self._actor_model = actor_model
+        self._vision_model = vision_model
+        self._allowed_groups = allowed_groups or []
+        self._reply_probability = reply_probability
+        
+        # 消息缓冲池字典：{group_id: MessageBuffer}
+        self._buffers: Dict[int, MessageBuffer] = {}
+        
+        # 防抖锁，防止并发操作同一群的缓冲区
+        self._buffer_locks: Dict[int, asyncio.Lock] = {}
+
+        # 大脑排队锁
+        self._brain_locks: Dict[int, asyncio.Lock] = {}
+        
+        logger.info(
+            f"GroupLLMHandler 初始化完成: "
+            f"防抖={debounce_seconds}s, "
+            f"打字延迟={typing_delay_min}~{typing_delay_max}s, "
+            f"导演={director_model}, 演员={actor_model}"
+        )
+    
+    @classmethod
+    def from_config(
+        cls,
+        config: BotConfig,
+        next_handler: Optional[MessageHandler] = None
+    ) -> 'GroupLLMHandler':
+        """
+        从配置对象创建处理器实例
+        
+        Args:
+            config: BotConfig 配置对象
+            next_handler: 责任链中的下一个处理器
+            
+        Returns:
+            配置化的 GroupLLMHandler 实例
+        """
+        return cls(
+            next_handler=next_handler,
+            debounce_seconds=config.debounce_seconds,
+            typing_delay_min=config.typing_delay_min,
+            typing_delay_max=config.typing_delay_max,
+            max_context_messages=config.max_context_messages,
+            director_model=config.director_model,
+            actor_model=config.actor_model,
+            vision_model=config.vision_model,
+            allowed_groups=config.allowed_groups,
+            reply_probability=config.reply_probability
+        )
+    
+    def _get_lock(self, group_id: int) -> asyncio.Lock:
+        """获取指定群的缓冲区锁"""
+        if group_id not in self._buffer_locks:
+            self._buffer_locks[group_id] = asyncio.Lock()
+        return self._buffer_locks[group_id]
+    
+    def _get_brain_lock(self, group_id: int) -> asyncio.Lock:
+        """获取指定群的大脑排队锁"""
+        if group_id not in self._brain_locks:
+            self._brain_locks[group_id] = asyncio.Lock()
+        return self._brain_locks[group_id]
+    
+    async def can_handle(self, event: dict) -> bool:
+        """
+        判断是否为群聊文本消息
+        
+        只处理群聊消息，且消息类型为文本。
+        """
+        # 检查是否为消息事件
+        if event.get('post_type') != 'message':
+            return False
+        
+        # 检查是否为群消息
+        if event.get('message_type') != 'group':
+            return False
+        
+        # 检查是否有文本内容
+        raw_message = event.get('raw_message', '')
+        if not raw_message or not raw_message.strip():
+            return False
+        
+        group_id = event.get('group_id')
+        if self._allowed_groups and group_id not in self._allowed_groups:
+            return False
+        
+        return True
+    
+    async def handle(self, event: dict, client: NapCatClient) -> bool:
+        """
+        处理群聊消息
+        
+        将消息加入缓冲池并启动/重置防抖定时器。
+        """
+        group_id = event.get('group_id')
+        user_id = event.get('user_id')
+        raw_message = event.get('raw_message', '')
+        self_id = event.get('self_id', 0)
+        
+        # 获取发送者信息
+        sender = event.get('sender', {})
+        sender_name = sender.get('card') or sender.get('nickname', '')
+        
+        is_at_me = f"[CQ:at,qq={self_id}]" in raw_message
+
+        # 🎯 【新增：图像拦截与视觉解析】
+        # 使用正则提取 NapCat CQ 码中的图片 URL: [CQ:image,file=...,url=https://...]
+        image_urls = re.findall(r'\[CQ:image,.*?url=([^\]]+)\]', raw_message)
+        # 把长长的 CQ 码替换成干净的占位符
+        clean_message = re.sub(r'\[CQ:image.*?\]', '[图片]', raw_message)
+
+        if image_urls:
+            logger.info(f"[群{group_id}] 拦截到 {len(image_urls)} 张图片，启动视觉解析...")
+            descriptions = []
+            for url in image_urls:
+                # 阻塞式获取图片文本描述（在防抖入池前完成翻译）
+                desc = await VisionAnalyzer.analyze(url, self._vision_model)
+                descriptions.append(desc)
+            
+            # 将视觉翻译结果悄悄附加在消息文字后面
+            clean_message += f" (视觉系统提示：{', '.join(descriptions)})"
+
+        # 🎯 【新增：把生硬的被艾特CQ码，直接翻译成"@我"】
+        if is_at_me:
+            # 这样大模型在看聊天记录时，看到的就是真实的"@我"，瞬间建立第一人称认知
+            clean_message = clean_message.replace(f"[CQ:at,qq={self_id}]", "@我 ")
+
+        # 构建消息对象
+        msg = GroupMessage(
+            group_id=group_id,
+            user_id=user_id,
+            raw_message=clean_message,
+            sender_name=sender_name,
+            timestamp=time.time(),
+            is_at_me=is_at_me
+        )
+        
+        # 将消息加入缓冲池（带防抖）
+        await self._add_to_buffer(msg, client)
+        
+        return True  # 已处理，不传递给下一个处理器
+    
+    async def _add_to_buffer(self, msg: GroupMessage, client: NapCatClient) -> None:
+        """
+        将消息加入缓冲池并重置防抖定时器
+        
+        【核心防抖逻辑】
+        1. 获取该群的缓冲区锁
+        2. 将消息追加到缓冲池
+        3. 取消旧的定时器（如果有）
+        4. 创建新的防抖定时器
+        5. 如果防抖期内无新消息，触发处理
+        """
+        group_id = msg.group_id
+        lock = self._get_lock(group_id)
+        
+        async with lock:
+            # 初始化缓冲池（如果不存在）
+            if group_id not in self._buffers:
+                self._buffers[group_id] = MessageBuffer()
+            
+            buffer = self._buffers[group_id]
+            
+            # 追加消息到缓冲池
+            buffer.messages.append(msg)
+            
+            # 限制上下文消息数量，防止过长
+            if len(buffer.messages) > self._max_context_messages:
+                buffer.messages = buffer.messages[-self._max_context_messages:]
+            
+            logger.debug(f"[群{group_id}] 消息入池: {msg.raw_message[:30]}...")
+            
+            # 取消旧的定时器任务
+            if buffer.timer_task and not buffer.timer_task.done():
+                buffer.timer_task.cancel()
+                logger.debug(f"[群{group_id}] 防抖定时器重置")
+            
+            # 【防抖重置】创建新的防抖定时器
+            buffer.timer_task = asyncio.create_task(
+                self._debounce_trigger(group_id, client)
+            )
+    
+    async def _debounce_trigger(self, group_id: int, client: NapCatClient) -> None:
+        """
+        防抖触发器
+        
+        等待 debounce_seconds 秒后触发处理。
+        如果在等待期间被取消（有新消息），则不执行处理。
+        """
+        try:
+            # 【防抖等待】配置的秒数内无新消息才触发
+            await asyncio.sleep(self._debounce_seconds)
+
+            # 一旦时间到了开始处理，就算有新消息重置定时器，也不打断大模型思考
+            await asyncio.shield(self._process_buffer(group_id, client))
+            
+        except asyncio.CancelledError:
+            # 被新消息取消，正常情况，不做任何处理
+            logger.debug(f"[群{group_id}] 防抖被新消息重置")
+            raise
+    
+    async def _process_buffer(self, group_id: int, client: NapCatClient) -> None:
+        """
+        处理缓冲池中的消息
+        """
+        # 🎯 1. 大脑排队锁 (注意：把以前那个 _is_processing 彻底抛弃了！)
+        brain_lock = self._get_brain_lock(group_id)
+        if brain_lock.locked():
+            logger.info(f"[群{group_id}] 🧠 大脑正在思考上一轮对话，本次触发转为后台排队...")
+            
+        async with brain_lock:
+            # 记录整条管线启动的时间
+            process_start_time = time.time()
+            
+            lock = self._get_lock(group_id)
+            async with lock:
+                buffer = self._buffers.get(group_id)
+                if not buffer or not buffer.messages:
+                    return
+                
+                # 提取消息并重置 @ 标记
+                messages = buffer.messages.copy()
+                force_reply = any(msg.is_at_me for msg in messages)
+                for msg in buffer.messages:
+                    msg.is_at_me = False
+                
+                logger.info(f"[群{group_id}] 📦 防抖结束，提取 {len(messages)} 条历史消息准备处理")
+
+            # 🎯 2. 掷骰子逻辑打印优化
+            if not force_reply and random.random() > self._reply_probability:
+                logger.info(f"[群{group_id}] 🎲 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默。")
+                return
+            elif force_reply:
+                logger.info(f"[群{group_id}] 🔔 触发 @ 必回，无视概率强制回复")
+            else:
+                logger.info(f"[群{group_id}] 🎲 掷骰子成功！准备主动插话...")
+            
+            full_context = self._build_context(messages)
+            actor_context = self._build_actor_context(messages, max_recent=8)
+            
+            try:
+                # ==========================================
+                # 🎬 【导演模型】推演核心逻辑和状态
+                # ==========================================
+                director_prompt = self._build_director_prompt(full_context, is_at_me=force_reply)
+                
+                # 打印发给导演的完整 Prompt
+                logger.info(f"[群{group_id}] 🎬 --- 发送给【导演】的最终提示词 ---\n{director_prompt}\n" + "-"*40)
+                logger.info(f"[群{group_id}] ⏳ 正在等待导演模型 ({self._director_model}) 思考...")
+                
+                t1 = time.time()
+                strategic_intent = await ask_llm(
+                    model_name=self._director_model,
+                    prompt_content=director_prompt
+                )
+                t2 = time.time()
+                
+                if strategic_intent.startswith("[LLM"):
+                    logger.error(f"[群{group_id}] ❌ 导演模型调用失败: {strategic_intent}")
+                    return
+                
+                logger.info(f"[群{group_id}] ✅ 导演思考完毕 (耗时: {t2-t1:.2f}s) 指令: {strategic_intent}")
+                
+                # ==========================================
+                # 🎭 【演员模型】根据指令生成最终回复
+                # ==========================================
+                actor_prompt = self._build_actor_prompt(actor_context, strategic_intent)
+                
+                # 打印发给演员的完整 Prompt
+                logger.info(f"[群{group_id}] 🎭 --- 发送给【演员】的最终提示词 ---\n{actor_prompt}\n" + "-"*40)
+                logger.info(f"[群{group_id}] ⏳ 正在等待演员模型 ({self._actor_model}) 飙戏...")
+                
+                t3 = time.time()
+                reply = await ask_llm(
+                    model_name=self._actor_model,
+                    prompt_content=actor_prompt
+                )
+                t4 = time.time()
+                
+                if reply.startswith("[LLM"):
+                    logger.error(f"[群{group_id}] ❌ 演员模型调用失败: {reply}")
+                    return
+                
+                logger.info(f"[群{group_id}] ✅ 演员台词生成完毕 (耗时: {t4-t3:.2f}s) 最终回复: {reply}")
+                
+                # ==========================================
+                # ⌨️ 物理层模拟与记忆回写
+                # ==========================================
+                await self._send_with_typing_simulation(group_id, reply, client)
+
+                async with lock:
+                    buffer = self._buffers.get(group_id)
+                    if buffer is not None:
+                        bot_msg = GroupMessage(
+                            group_id=group_id,
+                            user_id=0,
+                            raw_message=reply.replace('|', ''),
+                            sender_name="我",
+                            timestamp=time.time()
+                        )
+                        buffer.messages.append(bot_msg)
+                        if len(buffer.messages) > self._max_context_messages:
+                            buffer.messages = buffer.messages[-self._max_context_messages:]
+                            
+                total_time = time.time() - process_start_time
+                logger.info(f"[群{group_id}] 🏁 本轮思考与回复全部完成！全链路总耗时: {total_time:.2f}s")
+                            
+            except Exception as e:
+                logger.error(f"[群{group_id}] ❌ 处理异常: {type(e).__name__}: {e}")
+        # finally:
+        #     # 解锁：无论执行成功还是中途 return/报错，重置为空闲状态
+        #     self._is_processing[group_id] = False
+    
+    def _build_context(self, messages: List[GroupMessage]) -> str:
+        """
+        构建上下文字符串
+        
+        将多条消息格式化为对话上下文。
+        """
+        lines = [msg.format_context() for msg in messages]
+        return "\n".join(lines)
+    
+    def _build_actor_context(self, messages: List[GroupMessage], max_recent: int = 8) -> str:
+        """
+        构建演员专属的纯净上下文
+        """
+        # 直接截取最近的聊天记录，不进行自我过滤
+        recent_messages = messages[-max_recent:] if messages else []
+        
+        lines = [msg.format_context() for msg in recent_messages]
+        return "\n".join(lines)
+    
+    def _build_director_prompt(self, context: str, is_at_me: bool = False) -> str:
+        """
+        导演提示词
+        """
+        at_warning = "（注意：最新消息有人@了你，请给出针对性的回应策略）" if is_at_me else ""
+        return f"""阅读以下群聊记录，用一句话生成回复策略：
+分析当前聊天氛围和情境下语义，并给出符合情景的简短回复方向。{at_warning}
+（只需给出客观策略，不要生成具体台词；不要强行展开话题或反问；面对群友跳跃、毫无关联的多个话题时，只需抓住最新或最核心的一个话题进行回应，绝对不要试图把不相干的话题强行缝合在一起）
+
+【群聊记录】
+{context}
+
+回复策略："""
+
+
+
+    def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "") -> str:
+        """
+        演员提示词
+        """
+        return f"""你是这个QQ群里的群友。请根据给定的【回复策略】，自然地接一句话。
+
+【回复策略】
+{strategic_intent}
+
+【最近的聊天记录】(记录中带有 [我] 的发言就是你自己过去说的话)
+{context}
+
+【要求】
+1. 不要强行展开话题或反问，顺其自然。
+2. 不要用括号写内心戏，不要有任何机器感。
+3. 若策略提示当前在玩梗或开玩笑，请配合该氛围。
+4. 遇到多个毫不相干的跳跃话题时，只需顺着最想吐槽的或最新的那一个接话即可。
+
+直接输出你的回复文字（如果要分段发，用 | 符号分隔）："""
+    
+    async def _send_with_typing_simulation(
+        self,
+        group_id: int,
+        reply: str,
+        client: NapCatClient
+    ) -> None:
+        """
+        【物理层模拟】模拟真人打字发送
+        
+        1. 去除末尾句号
+        2. 按 | 分段
+        3. 每段之间随机延迟（配置的延迟范围）
+        """
+        # 去除末尾的句号
+        reply = reply.rstrip('。')
+        
+        # 按 | 分段
+        segments = [s.strip() for s in reply.split('|') if s.strip()]
+        
+        if not segments:
+            return
+        
+        logger.info(f"[群{group_id}] 准备发送 {len(segments)} 段消息")
+        
+        for i, segment in enumerate(segments):
+            # 发送消息
+            try:
+                await client.send_group_msg(group_id, segment)
+                logger.info(f"[群{group_id}] 已发送 [{i+1}/{len(segments)}]: {segment}")
+            except Exception as e:
+                logger.error(f"[群{group_id}] 发送失败: {e}")
+                continue
+            
+            # 如果不是最后一段，进行随机延迟（模拟打字）
+            if i < len(segments) - 1:
+                delay = random.uniform(self._typing_delay_min, self._typing_delay_max)
+                logger.debug(f"[群{group_id}] 模拟打字中... ({delay:.2f}s)")
+                await asyncio.sleep(delay)
