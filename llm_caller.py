@@ -492,6 +492,9 @@ async def ask_llm(
     max_retries = global_settings.get('max_retries', 2)
     retry_delay = global_settings.get('retry_delay', 1.0)
     
+    # 读取代理配置
+    proxy_url = global_settings.get('proxy', None)
+    
     # 获取 API 信息
     api_url = model_config.get('api_url', '')
     provider = model_config.get('provider', 'openai')
