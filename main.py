@@ -560,12 +560,12 @@ class GroupLLMHandler(MessageHandler):
             # 提取消息（消费掉缓冲池）
             messages = buffer.messages.copy()
             
+            force_reply = any(msg.is_at_me for msg in messages)
             for msg in buffer.messages:
                 msg.is_at_me = False
             
             logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
 
-        force_reply = any(msg.is_at_me for msg in messages)
         # 【掷骰子逻辑】如果没有人 @ 我，才去乖乖摇骰子
         if not force_reply and random.random() > self._reply_probability:
             logger.info(f"[群{group_id}] 掷骰子失败 (概率 {self._reply_probability})，本次保持沉默，只听不说。")
