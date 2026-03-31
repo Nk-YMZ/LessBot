@@ -671,7 +671,7 @@ class GroupLLMHandler(MessageHandler):
         at_warning = "（注意：最新消息有人@了你，请给出针对性的回应策略）" if is_at_me else ""
         return f"""阅读以下群聊记录，用一句话生成回复策略：
 分析当前聊天氛围和情境下语义，并给出符合情景的简短回复方向。{at_warning}
-（只需给出客观策略，不要生成具体台词）
+（只需给出客观策略，不要生成具体台词,不要强行展开话题或反问）
 
 【群聊记录】
 {context}
