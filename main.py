@@ -560,6 +560,9 @@ class GroupLLMHandler(MessageHandler):
             # 提取消息（消费掉缓冲池）
             messages = buffer.messages.copy()
             
+            for msg in buffer.messages:
+                msg.is_at_me = False
+            
             logger.info(f"[群{group_id}] 防抖结束，处理 {len(messages)} 条消息")
 
         force_reply = any(msg.is_at_me for msg in messages)
@@ -663,41 +666,41 @@ class GroupLLMHandler(MessageHandler):
     
     def _build_director_prompt(self, context: str, is_at_me: bool = False) -> str:
         """
-        极简版导演提示词 (禁止写台词)
+        导演提示词
         """
-        at_warning = "\n【注意】：刚才的聊天中群友专门 @ 了你！你必须明确意识到自己是“被搭话的人”，并在指令中要求演员以“被点名者”的第一人称视角来回应。" if is_at_me else ""
-        return f"""阅读以下群聊记录，用一句话完成两个任务：
-1. 概括群友最新正在聊的具体话题。
-2. 指示回复的【情绪和立场】。
-（禁止写出具体的台词！禁止教演员怎么说话！只能给出方向）
+        at_warning = "（注意：最新消息有人@了你，请给出针对性的回应策略）" if is_at_me else ""
+        return f"""阅读以下群聊记录，用一句话生成回复策略：
+分析当前聊天氛围和情境下语义，并给出符合情景的简短回复方向。{at_warning}
+（只需给出客观策略，不要生成具体台词）
 
 【群聊记录】
 {context}
 
-直接输出这句话："""
+回复策略："""
+
+
 
     def _build_actor_prompt(self, context: str, strategic_intent: str, recent_self: str = "") -> str:
         """
-        极简版演员提示词
+        演员提示词
         """
-        return f"""你是这个QQ群里的普通群友。
+        return f"""你是这个QQ群里的群友。请根据给定的【回复策略】，自然地接一句话。
 
-【回复方向】
+【回复策略】
 {strategic_intent}
 
-【你最近说过的话】
+【你最近说过的话】(避免重复)
 {recent_self}
-（不能重复你刚说过的意思和词汇！请换个角度接话！）
 
 【最近的聊天记录】
 {context}
 
 【要求】
-1. 参考回复方向，用符合情景的语气接一句话。
-2. 绝对不要用括号写内心戏，不要有任何机器感。
-3. 如果想分段发，用 | 符号分隔。
+1. 不要强行展开话题或反问，顺其自然。
+2. 不要用括号写内心戏，不要有任何机器感。
+3. 若策略提示当前在玩梗或开玩笑，请配合该氛围。
 
-直接输出你的回复文字："""
+直接输出你的回复文字（如果要分段发，用 | 符号分隔）："""
     
     async def _send_with_typing_simulation(
         self,
